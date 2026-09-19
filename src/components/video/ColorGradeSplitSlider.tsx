@@ -51,6 +51,9 @@ export const ColorGradeSplitSlider: React.FC<Props> = ({
     const vRight = videoRightRef.current;
     if (!vLeft || !vRight) return;
 
+    vLeft.muted = true;
+    vRight.muted = true;
+
     if (isPlaying) {
       vLeft.play().catch(() => {});
       vRight.play().catch(() => {});
@@ -58,7 +61,7 @@ export const ColorGradeSplitSlider: React.FC<Props> = ({
       vLeft.pause();
       vRight.pause();
     }
-  }, [isPlaying]);
+  }, [isPlaying, videoSrc]);
 
   // Drag divider handling
   const updateSplit = useCallback((clientX: number) => {
