@@ -31,8 +31,8 @@ interface Props {
 
 export const CinemaStageModal: React.FC<Props> = ({ project, onClose }) => {
   const [activeTab, setActiveTab] = useState<'cinema' | 'grade' | 'specs'>('cinema');
-  const [isPlaying, setIsPlaying] = useState(true);
-  const [isMuted, setIsMuted] = useState(false);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [isMuted, setIsMuted] = useState(true);
   const [volume, setVolume] = useState(0.85);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
@@ -41,6 +41,36 @@ export const CinemaStageModal: React.FC<Props> = ({ project, onClose }) => {
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const stageContainerRef = useRef<HTMLDivElement>(null);
+
+  // Reliable Autoplay with automatic muted fallback to comply with modern browser policies
+  useEffect(() => {
+    if (!project || activeTab !== 'cinema') return;
+    const video = videoRef.current;
+    if (!video) return;
+
+    video.currentTime = 0;
+    setCurrentTime(0);
+
+    const playVideo = async () => {
+      try {
+        video.muted = isMuted;
+        await video.play();
+        setIsPlaying(true);
+      } catch {
+        // If unmuted autoplay blocked, fallback to muted play so video starts immediately
+        video.muted = true;
+        setIsMuted(true);
+        try {
+          await video.play();
+          setIsPlaying(true);
+        } catch {
+          setIsPlaying(false);
+        }
+      }
+    };
+
+    playVideo();
+  }, [project, activeTab, isMuted]);
 
   // Keyboard shortcut listener: Space to toggle play/pause, Esc to close, Arrow keys for 1-frame jog
   useEffect(() => {
@@ -82,7 +112,15 @@ export const CinemaStageModal: React.FC<Props> = ({ project, onClose }) => {
     const video = videoRef.current;
     if (!video) return;
     if (video.paused) {
-      video.play().then(() => setIsPlaying(true)).catch(() => {});
+      video
+        .play()
+        .then(() => setIsPlaying(true))
+        .catch(() => {
+          // If browser policy blocks sound, mute and play
+          video.muted = true;
+          setIsMuted(true);
+          video.play().then(() => setIsPlaying(true)).catch(() => {});
+        });
     } else {
       video.pause();
       setIsPlaying(false);
@@ -245,11 +283,36 @@ export const CinemaStageModal: React.FC<Props> = ({ project, onClose }) => {
                     autoPlay
                     loop
                     muted={isMuted}
+                    onPlay={() => setIsPlaying(true)}
+                    onPause={() => setIsPlaying(false)}
                     onTimeUpdate={() => setCurrentTime(videoRef.current?.currentTime || 0)}
                     onLoadedMetadata={() => setDuration(videoRef.current?.duration || 10)}
                     className="w-full h-full object-contain cursor-pointer"
                     onClick={togglePlay}
                   />
+
+                  {/* Center Play Overlay when Paused */}
+                  {!isPlaying && (
+                    <div
+                      onClick={togglePlay}
+                      className="absolute inset-0 flex items-center justify-center bg-black/40 z-20 cursor-pointer"
+                    >
+                      <div className="w-16 h-16 sm:w-20 sm:h-20 rounded-full bg-cyan-500/90 hover:bg-cyan-400 text-black flex items-center justify-center shadow-2xl transition-transform hover:scale-110">
+                        <Play className="w-8 h-8 sm:w-10 sm:h-10 fill-current ml-1" />
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Mute status hint */}
+                  {isMuted && isPlaying && (
+                    <button
+                      onClick={toggleMute}
+                      className="absolute top-4 left-4 z-30 px-3 py-1 rounded-full bg-black/80 backdrop-blur-md border border-white/20 text-xs font-mono text-cyan-300 hover:text-white flex items-center gap-1.5 transition-all shadow-lg cursor-pointer"
+                    >
+                      <VolumeX className="w-3.5 h-3.5 text-rose-400" />
+                      <span>Click to Unmute</span>
+                    </button>
+                  )}
 
                   {/* Anamorphic Scope Letterbox subtle guide lines */}
                   {project.aspectRatio === '2.39:1' && (

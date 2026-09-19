@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useRef, useState, useEffect, useCallback } from 'react';
-import { Play, Pause, Volume2, VolumeX, Maximize2, Film, Sparkles } from 'lucide-react';
+import { Play, Pause, Volume2, VolumeX, Maximize2 } from 'lucide-react';
 import { formatSMPTE } from '@/lib/timecode';
 import { VideoProject } from '@/data/projects';
 
@@ -28,6 +28,7 @@ export const NativeVideoPlayer: React.FC<Props> = ({
   const [duration, setDuration] = useState(0);
   const [hoverPosition, setHoverPosition] = useState<number | null>(null);
   const [hoverTimecode, setHoverTimecode] = useState('00:00:00:00');
+  const [userInteracted, setUserInteracted] = useState(false);
 
   // Throttle references for silky 60fps seek without decoder choking
   const pendingSeekTime = useRef<number | null>(null);
@@ -131,7 +132,7 @@ export const NativeVideoPlayer: React.FC<Props> = ({
   const handleMouseEnter = () => {
     setIsHovered(true);
     const video = videoRef.current;
-    if (video) {
+    if (video && !userInteracted) {
       video.play().then(() => setIsPlaying(true)).catch(() => {});
     }
   };
@@ -141,10 +142,35 @@ export const NativeVideoPlayer: React.FC<Props> = ({
     setHoverPosition(null);
     if (rafIdRef.current) cancelAnimationFrame(rafIdRef.current);
     const video = videoRef.current;
-    if (video && !isReelMode) {
+    // Only pause on leave if user hasn't explicitly clicked play
+    if (video && !isReelMode && !userInteracted) {
       video.pause();
       setIsPlaying(false);
       video.currentTime = 0;
+    }
+  };
+
+  // Direct click-to-play toggle on the card video
+  const togglePlay = (e?: React.MouseEvent) => {
+    e?.stopPropagation();
+    const video = videoRef.current;
+    if (!video) return;
+
+    setUserInteracted(true);
+
+    if (video.paused) {
+      video
+        .play()
+        .then(() => setIsPlaying(true))
+        .catch(() => {
+          // Fallback: Mute if browser blocks audio autoplay
+          video.muted = true;
+          setIsMuted(true);
+          video.play().then(() => setIsPlaying(true)).catch(() => {});
+        });
+    } else {
+      video.pause();
+      setIsPlaying(false);
     }
   };
 
@@ -156,13 +182,18 @@ export const NativeVideoPlayer: React.FC<Props> = ({
     setIsMuted(video.muted);
   };
 
+  const handleInspectClick = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    onInspect?.();
+  };
+
   return (
     <div
       ref={containerRef}
       onMouseMove={handleMouseMove}
       onMouseEnter={handleMouseEnter}
       onMouseLeave={handleMouseLeave}
-      onClick={onInspect}
+      onClick={() => togglePlay()}
       className={`group relative w-full ${aspectClass} bg-[#07070b] overflow-hidden cursor-pointer select-none border border-white/10 transition-all duration-500 ${
         isVertical
           ? 'rounded-[28px] max-h-[520px] max-w-[292px] mx-auto ring-1 ring-white/10 shadow-[0_20px_50px_rgba(0,0,0,0.8)]'
@@ -187,6 +218,8 @@ export const NativeVideoPlayer: React.FC<Props> = ({
         loop
         playsInline
         preload="metadata"
+        onPlay={() => setIsPlaying(true)}
+        onPause={() => setIsPlaying(false)}
         onTimeUpdate={handleTimeUpdate}
         onLoadedMetadata={handleLoadedMetadata}
         onSeeked={handleSeeked}
@@ -196,9 +229,9 @@ export const NativeVideoPlayer: React.FC<Props> = ({
       {/* Subtle Ambient Film Vignette */}
       <div className="absolute inset-0 bg-gradient-to-t from-[#07070a]/90 via-transparent to-[#07070a]/30 pointer-events-none" />
 
-      {/* Top Format & Aspect Ratio Badge */}
-      <div className="absolute top-3.5 left-3.5 right-3.5 flex items-center justify-between z-20 pointer-events-none">
-        <div className="flex items-center gap-2">
+      {/* Top Format Badge & Quick Action Buttons */}
+      <div className="absolute top-3.5 left-3.5 right-3.5 flex items-center justify-between z-20">
+        <div className="flex items-center gap-2 pointer-events-none">
           <span className="px-2.5 py-1 rounded-full bg-black/75 backdrop-blur-md border border-white/15 text-[10px] font-mono text-cyan-300 font-bold uppercase tracking-wider shadow-md">
             {project.formatBadge}
           </span>
@@ -207,25 +240,46 @@ export const NativeVideoPlayer: React.FC<Props> = ({
           </span>
         </div>
 
-        {/* Audio Toggle button */}
-        <button
-          onClick={toggleMute}
-          className="pointer-events-auto p-1.5 rounded-full bg-black/75 backdrop-blur-md border border-white/15 text-zinc-300 hover:text-white hover:border-cyan-400/50 transition-all shadow-md"
-          title={isMuted ? 'Unmute Audio' : 'Mute Audio'}
-          aria-label={isMuted ? 'Unmute Audio' : 'Mute Audio'}
-        >
-          {isMuted ? <VolumeX className="w-3.5 h-3.5" /> : <Volume2 className="w-3.5 h-3.5 text-cyan-400" />}
-        </button>
+        {/* Top Controls: Audio Toggle & Expand Cinema Stage */}
+        <div className="flex items-center gap-1.5">
+          <button
+            onClick={toggleMute}
+            className="p-1.5 rounded-full bg-black/75 backdrop-blur-md border border-white/15 text-zinc-300 hover:text-white hover:border-cyan-400/50 transition-all shadow-md cursor-pointer"
+            title={isMuted ? 'Unmute Audio' : 'Mute Audio'}
+            aria-label={isMuted ? 'Unmute Audio' : 'Mute Audio'}
+          >
+            {isMuted ? <VolumeX className="w-3.5 h-3.5" /> : <Volume2 className="w-3.5 h-3.5 text-cyan-400" />}
+          </button>
+
+          {onInspect && (
+            <button
+              onClick={handleInspectClick}
+              className="p-1.5 rounded-full bg-black/75 backdrop-blur-md border border-white/15 text-zinc-300 hover:text-white hover:border-cyan-400/50 transition-all shadow-md cursor-pointer"
+              title="Expand to Full Cinema Stage"
+              aria-label="Expand to Full Cinema Stage"
+            >
+              <Maximize2 className="w-3.5 h-3.5 text-cyan-400" />
+            </button>
+          )}
+        </div>
       </div>
 
-      {/* Center Play Indicator when paused */}
-      {!isPlaying && (
-        <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-20">
-          <div className="w-12 h-12 rounded-full bg-black/60 backdrop-blur-md border border-white/20 flex items-center justify-center text-white/90 shadow-2xl group-hover:scale-110 group-hover:bg-cyan-500/80 group-hover:text-black group-hover:border-cyan-400 transition-all duration-300">
-            <Play className="w-5 h-5 fill-current ml-0.5" />
-          </div>
+      {/* Center Big Play / Pause Indicator */}
+      <div className="absolute inset-0 flex items-center justify-center z-20 pointer-events-none">
+        <div
+          className={`w-14 h-14 rounded-full bg-black/70 backdrop-blur-md border border-white/20 flex items-center justify-center text-white shadow-2xl transition-all duration-300 ${
+            isPlaying
+              ? 'opacity-0 scale-75 group-hover:opacity-40 group-hover:scale-95'
+              : 'opacity-100 scale-100 bg-cyan-500/90 text-black border-cyan-400'
+          }`}
+        >
+          {isPlaying ? (
+            <Pause className="w-6 h-6 fill-current text-white" />
+          ) : (
+            <Play className="w-6 h-6 fill-current ml-0.5 text-black" />
+          )}
         </div>
-      )}
+      </div>
 
       {/* Hover Timecode Bubble Follower (SMPTE at 24fps) */}
       {hoverPosition !== null && (
@@ -267,9 +321,8 @@ export const NativeVideoPlayer: React.FC<Props> = ({
             </h4>
           </div>
 
-          <div className="flex items-center gap-1 px-2.5 py-1 rounded-full bg-black/70 backdrop-blur-md border border-white/10 text-[10px] font-mono text-zinc-300 group-hover:text-cyan-300 group-hover:border-cyan-400/40 transition-colors shrink-0">
-            <span>Play</span>
-            <Maximize2 className="w-3 h-3 text-cyan-400" />
+          <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-black/70 backdrop-blur-md border border-white/10 text-[10px] font-mono text-zinc-300 group-hover:text-cyan-300 group-hover:border-cyan-400/40 transition-colors shrink-0">
+            <span>{isPlaying ? 'Playing' : 'Click to Play'}</span>
           </div>
         </div>
       )}
