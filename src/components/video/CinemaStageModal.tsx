@@ -44,16 +44,37 @@ export const CinemaStageModal: React.FC<Props> = ({ project, onClose }) => {
     setMounted(true);
   }, []);
 
-  // Reset tab and states when a new project opens
+  // Listen to native fullscreen changes (via button or Escape key)
+  useEffect(() => {
+    const handleFsChange = () => {
+      setIsFullscreen(!!document.fullscreenElement);
+    };
+    document.addEventListener('fullscreenchange', handleFsChange);
+    document.addEventListener('webkitfullscreenchange', handleFsChange);
+    return () => {
+      document.removeEventListener('fullscreenchange', handleFsChange);
+      document.removeEventListener('webkitfullscreenchange', handleFsChange);
+    };
+  }, []);
+
+  // When opening a project, pause any background page videos to prevent decoder/audio clash
   useEffect(() => {
     if (project) {
       setActiveTab('cinema');
       setCurrentTime(0);
       setIsPlaying(false);
+      setIsMuted(true); // Always ensure clean muted start for 100% browser autoplay approval
+
+      const allVideos = document.querySelectorAll('video');
+      allVideos.forEach((v) => {
+        if (v !== videoRef.current) {
+          v.pause();
+        }
+      });
     }
   }, [project?.id]);
 
-  // Reliable Autoplay when project changes or tab switches to cinema
+  // Robust Autoplay Engine for all videos
   useEffect(() => {
     if (!project || activeTab !== 'cinema') return;
     const video = videoRef.current;
@@ -61,35 +82,47 @@ export const CinemaStageModal: React.FC<Props> = ({ project, onClose }) => {
 
     let isCancelled = false;
 
+    // Reset seek state
+    video.currentTime = 0;
+    setCurrentTime(0);
+
     const startPlayback = async () => {
-      if (!video) return;
+      if (!video || isCancelled) return;
       try {
-        video.muted = isMuted;
-        await video.play();
-        if (!isCancelled) setIsPlaying(true);
-      } catch {
-        // Fallback to muted autoplay (complying with Chromium / Safari autoplay policy)
         video.muted = true;
         setIsMuted(true);
-        try {
-          await video.play();
-          if (!isCancelled) setIsPlaying(true);
-        } catch (err) {
-          if (!isCancelled) setIsPlaying(false);
-        }
+        await video.play();
+        if (!isCancelled) setIsPlaying(true);
+      } catch (err) {
+        console.warn('Initial autoplay attempt delayed, retrying:', err);
+        setTimeout(async () => {
+          if (video && !isCancelled) {
+            try {
+              video.muted = true;
+              await video.play();
+              if (!isCancelled) setIsPlaying(true);
+            } catch {
+              if (!isCancelled) setIsPlaying(false);
+            }
+          }
+        }, 120);
       }
     };
 
     if (video.readyState >= 2) {
       startPlayback();
     } else {
-      const handleCanPlay = () => {
+      const handleReady = () => {
         if (!isCancelled) startPlayback();
       };
-      video.addEventListener('canplay', handleCanPlay, { once: true });
+      video.addEventListener('loadeddata', handleReady, { once: true });
+      video.addEventListener('canplay', handleReady, { once: true });
+      // Force initial fetch
+      video.load();
       return () => {
         isCancelled = true;
-        video.removeEventListener('canplay', handleCanPlay);
+        video.removeEventListener('loadeddata', handleReady);
+        video.removeEventListener('canplay', handleReady);
       };
     }
 
@@ -104,7 +137,11 @@ export const CinemaStageModal: React.FC<Props> = ({ project, onClose }) => {
 
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
-        onClose();
+        if (document.fullscreenElement) {
+          document.exitFullscreen().catch(() => {});
+        } else {
+          onClose();
+        }
       } else if (e.code === 'Space') {
         e.preventDefault();
         togglePlay();
@@ -126,11 +163,11 @@ export const CinemaStageModal: React.FC<Props> = ({ project, onClose }) => {
     };
   }, [project, onClose, isPlaying]);
 
-  // Frame-by-frame jog helper (1 frame at 24fps = 1/24 second)
+  // Frame-by-frame jog helper (1 frame at 30fps = 1/30 second)
   const jogFrame = useCallback((frames: number) => {
     const video = videoRef.current;
     if (!video) return;
-    const delta = frames * (1 / 24);
+    const delta = frames * (1 / 30);
     video.currentTime = Math.max(0, Math.min(video.duration || 10, video.currentTime + delta));
   }, []);
 
@@ -185,11 +222,27 @@ export const CinemaStageModal: React.FC<Props> = ({ project, onClose }) => {
   };
 
   const toggleFullscreen = () => {
-    if (!stageContainerRef.current) return;
-    if (!document.fullscreenElement) {
-      stageContainerRef.current.requestFullscreen().then(() => setIsFullscreen(true)).catch(() => {});
+    const nextFs = !isFullscreen;
+    setIsFullscreen(nextFs);
+
+    const container = stageContainerRef.current;
+    const video = videoRef.current;
+    if (nextFs) {
+      if (container && container.requestFullscreen) {
+        container.requestFullscreen().catch(() => {
+          if (video && (video as any).webkitEnterFullscreen) {
+            (video as any).webkitEnterFullscreen();
+          }
+        });
+      } else if (video && (video as any).webkitEnterFullscreen) {
+        (video as any).webkitEnterFullscreen();
+      }
     } else {
-      document.exitFullscreen().then(() => setIsFullscreen(false)).catch(() => {});
+      if (document.fullscreenElement && document.exitFullscreen) {
+        document.exitFullscreen().catch(() => {});
+      } else if ((document as any).webkitExitFullscreen) {
+        (document as any).webkitExitFullscreen();
+      }
     }
   };
 
@@ -197,7 +250,9 @@ export const CinemaStageModal: React.FC<Props> = ({ project, onClose }) => {
 
   return createPortal(
     <AnimatePresence>
-      <div className="fixed inset-0 z-[99999] flex items-center justify-center p-2 sm:p-4 md:p-6 overflow-hidden">
+      <div className={`fixed inset-0 z-[99999] flex items-center justify-center overflow-hidden ${
+        isFullscreen ? 'p-0' : 'p-2 sm:p-4 md:p-6'
+      }`}>
         {/* Backdrop blur with light dismiss */}
         <motion.div
           initial={{ opacity: 0 }}
@@ -215,19 +270,30 @@ export const CinemaStageModal: React.FC<Props> = ({ project, onClose }) => {
           animate={{ opacity: 1, scale: 1, y: 0 }}
           exit={{ opacity: 0, scale: 0.96, y: 16 }}
           transition={{ type: 'spring', damping: 28, stiffness: 350 }}
-          className="relative w-full max-w-5xl h-[92vh] max-h-[860px] bg-[#09090f] border border-white/15 rounded-3xl shadow-[0_25px_70px_rgba(0,0,0,0.95)] flex flex-col overflow-hidden text-zinc-100 z-10"
+          className={`relative w-full flex flex-col overflow-hidden text-zinc-100 z-10 transition-all duration-300 ${
+            isFullscreen
+              ? 'fixed inset-0 w-screen h-screen max-w-none max-h-none rounded-none border-0 bg-black justify-between p-3 sm:p-5'
+              : 'max-w-4xl h-[92vh] max-h-[860px] bg-[#09090f] border border-white/15 rounded-3xl shadow-[0_25px_70px_rgba(0,0,0,0.95)]'
+          }`}
           role="dialog"
           aria-modal="true"
           aria-labelledby="cinema-title"
         >
           {/* Top Cinema Stage Header */}
-          <div className="flex items-center justify-between px-4 sm:px-6 py-3.5 border-b border-white/10 bg-[#0c0c14]/95 backdrop-blur-xl shrink-0">
+          <div
+            className={`flex items-center justify-between px-4 sm:px-6 py-3 border-b border-white/10 bg-[#0c0c14]/95 backdrop-blur-xl shrink-0 z-20 ${
+              isFullscreen ? 'w-full max-w-4xl mx-auto rounded-2xl border' : ''
+            }`}
+          >
             <div className="flex items-center gap-3">
               <span className="w-2.5 h-2.5 rounded-full bg-cyan-400 animate-pulse" />
               <div>
-                <h2 id="cinema-title" className="text-sm sm:text-base font-bold text-white tracking-tight flex items-center gap-2">
+                <h2
+                  id="cinema-title"
+                  className="text-xs sm:text-sm md:text-base font-bold text-white tracking-tight flex items-center gap-2"
+                >
                   {project.title}
-                  <span className="text-[11px] px-2.5 py-0.5 rounded-full bg-cyan-500/15 text-cyan-300 border border-cyan-500/30 font-mono font-normal">
+                  <span className="text-[10px] sm:text-[11px] px-2.5 py-0.5 rounded-full bg-cyan-500/15 text-cyan-300 border border-cyan-500/30 font-mono font-normal">
                     {project.formatBadge}
                   </span>
                 </h2>
@@ -238,10 +304,10 @@ export const CinemaStageModal: React.FC<Props> = ({ project, onClose }) => {
             </div>
 
             {/* Stage Viewport Tabs */}
-            <div className="flex items-center gap-1.5 p-1 rounded-xl bg-black/60 border border-white/10">
+            <div className="flex items-center gap-1 sm:gap-1.5 p-1 rounded-xl bg-black/60 border border-white/10">
               <button
                 onClick={() => setActiveTab('cinema')}
-                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
+                className={`flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
                   activeTab === 'cinema'
                     ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 shadow-sm'
                     : 'text-zinc-400 hover:text-white'
@@ -254,7 +320,7 @@ export const CinemaStageModal: React.FC<Props> = ({ project, onClose }) => {
               {project.hasColorGradeSlider && (
                 <button
                   onClick={() => setActiveTab('grade')}
-                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
+                  className={`flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
                     activeTab === 'grade'
                       ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 shadow-sm'
                       : 'text-zinc-400 hover:text-white'
@@ -267,7 +333,7 @@ export const CinemaStageModal: React.FC<Props> = ({ project, onClose }) => {
 
               <button
                 onClick={() => setActiveTab('specs')}
-                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
+                className={`flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
                   activeTab === 'specs'
                     ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 shadow-sm'
                     : 'text-zinc-400 hover:text-white'
@@ -278,31 +344,44 @@ export const CinemaStageModal: React.FC<Props> = ({ project, onClose }) => {
               </button>
             </div>
 
-            {/* Close Lightbox */}
-            <button
-              onClick={onClose}
-              className="p-2 rounded-xl bg-white/5 hover:bg-white/10 border border-white/10 text-zinc-400 hover:text-white transition-colors"
-              aria-label="Close cinema stage"
-            >
-              <X className="w-5 h-5" />
-            </button>
+            {/* Close / Exit Fullscreen */}
+            <div className="flex items-center gap-1.5">
+              {isFullscreen && (
+                <button
+                  onClick={toggleFullscreen}
+                  className="p-2 rounded-xl bg-white/5 hover:bg-white/10 border border-white/10 text-zinc-400 hover:text-white transition-colors"
+                  aria-label="Exit fullscreen"
+                  title="Exit Fullscreen"
+                >
+                  <Minimize2 className="w-4 h-4" />
+                </button>
+              )}
+              <button
+                onClick={onClose}
+                className="p-2 rounded-xl bg-white/5 hover:bg-white/10 border border-white/10 text-zinc-400 hover:text-white transition-colors"
+                aria-label="Close cinema stage"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
           </div>
 
           {/* Main Stage Viewport */}
-          <div className="flex-1 relative flex flex-col items-center justify-center p-3 sm:p-5 bg-radial from-[#12121e] via-[#08080f] to-[#040407] overflow-hidden">
+          <div className="flex-1 relative flex flex-col items-center justify-center p-3 sm:p-4 bg-radial from-[#12121e] via-[#08080f] to-[#040407] overflow-hidden">
             {activeTab === 'cinema' && (
               <div className="w-full h-full flex flex-col items-center justify-center">
                 {/* Cinema Screen Frame for 9:16 Vertical Reel */}
                 <div
-                  className={`relative rounded-2xl overflow-hidden shadow-[0_10px_50px_rgba(0,0,0,0.8)] border border-white/20 bg-black flex items-center justify-center shrink-0 group ${
-                    project.aspectRatio === '9:16'
-                      ? 'h-[60vh] sm:h-[64vh] max-h-[560px] aspect-[9/16]'
-                      : 'w-full max-w-4xl aspect-[16/9]'
+                  className={`relative rounded-2xl overflow-hidden shadow-[0_10px_50px_rgba(0,0,0,0.8)] border border-white/20 bg-black flex items-center justify-center shrink-0 group transition-all duration-300 ${
+                    isFullscreen
+                      ? 'h-[76vh] sm:h-[80vh] aspect-[9/16] max-h-none'
+                      : 'w-full max-w-[330px] sm:max-w-[360px] aspect-[9/16] h-[58vh] sm:h-[63vh] max-h-[540px]'
                   }`}
                 >
                   <video
                     key={project.id}
                     ref={videoRef}
+                    src={project.videoSrc}
                     playsInline
                     autoPlay
                     loop
@@ -317,11 +396,9 @@ export const CinemaStageModal: React.FC<Props> = ({ project, onClose }) => {
                     onLoadedMetadata={() => {
                       if (videoRef.current) setDuration(videoRef.current.duration || 10);
                     }}
-                    className="w-full h-full object-cover cursor-pointer"
+                    className="w-full h-full object-cover cursor-pointer select-none"
                     onClick={togglePlay}
-                  >
-                    <source src={project.videoSrc} type="video/mp4" />
-                  </video>
+                  />
 
                   {/* Center Play Overlay when Paused */}
                   {!isPlaying && (
@@ -338,16 +415,16 @@ export const CinemaStageModal: React.FC<Props> = ({ project, onClose }) => {
                     </div>
                   )}
 
-                  {/* Interactive Tap-to-Unmute Pill Badge */}
+                  {/* Clean Corner Unmute Badge (Positioned at bottom-right so it never obscures top titles) */}
                   <button
                     onClick={(e) => {
                       e.stopPropagation();
                       toggleMute();
                     }}
-                    className={`absolute top-3 left-3 z-30 px-3 py-1.5 rounded-full border backdrop-blur-md text-xs font-mono font-medium flex items-center gap-1.5 transition-all shadow-lg cursor-pointer ${
+                    className={`absolute bottom-3 right-3 z-30 px-3 py-1.5 rounded-full border backdrop-blur-md text-xs font-mono font-medium flex items-center gap-1.5 transition-all shadow-xl cursor-pointer ${
                       isMuted
-                        ? 'bg-black/85 hover:bg-cyan-500 hover:text-black text-cyan-300 border-cyan-400/40 animate-pulse hover:animate-none'
-                        : 'bg-black/70 hover:bg-black/90 text-emerald-300 border-white/20'
+                        ? 'bg-black/90 hover:bg-cyan-500 hover:text-black text-cyan-300 border-cyan-400/40 animate-pulse hover:animate-none'
+                        : 'bg-black/75 hover:bg-black/90 text-emerald-300 border-white/20'
                     }`}
                   >
                     {isMuted ? (
@@ -364,8 +441,14 @@ export const CinemaStageModal: React.FC<Props> = ({ project, onClose }) => {
                   </button>
                 </div>
 
-                {/* Sleek Cinema Player Control Bar (Comfortably Positioned Below Frame) */}
-                <div className="w-full max-w-[420px] sm:max-w-[440px] mt-3 bg-black/90 backdrop-blur-2xl border border-white/15 rounded-2xl p-2.5 shadow-2xl flex flex-col gap-2 shrink-0 z-30">
+                {/* Symmetrical Cinema Player Control Bar (Precisely Matching the Frame Width) */}
+                <div
+                  className={`w-full mt-3 bg-black/90 backdrop-blur-2xl border border-white/15 rounded-2xl p-2.5 shadow-2xl flex flex-col gap-2 shrink-0 z-30 transition-all duration-300 ${
+                    isFullscreen
+                      ? 'max-w-[420px] mx-auto'
+                      : 'max-w-[330px] sm:max-w-[360px]'
+                  }`}
+                >
                   {/* Scrubber track */}
                   <div className="relative flex items-center w-full group">
                     <input
@@ -382,7 +465,7 @@ export const CinemaStageModal: React.FC<Props> = ({ project, onClose }) => {
                   {/* Controls Row */}
                   <div className="flex items-center justify-between text-xs font-mono">
                     {/* Left: Play/Pause, Frame Jog */}
-                    <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-1.5 sm:gap-2">
                       <button
                         onClick={togglePlay}
                         className="p-1.5 rounded-xl bg-white/10 hover:bg-cyan-500/20 text-white hover:text-cyan-300 transition-all border border-white/10"
@@ -395,7 +478,7 @@ export const CinemaStageModal: React.FC<Props> = ({ project, onClose }) => {
                       <div className="flex items-center bg-white/5 rounded-lg border border-white/10">
                         <button
                           onClick={() => jogFrame(-1)}
-                          className="px-2 py-1 text-[10px] text-zinc-400 hover:text-white transition-colors flex items-center gap-0.5 border-r border-white/5"
+                          className="px-1.5 py-1 text-[10px] text-zinc-400 hover:text-white transition-colors flex items-center gap-0.5 border-r border-white/5"
                           title="Step Back 1 Frame (Left Arrow)"
                         >
                           <ChevronLeft className="w-3 h-3" />
@@ -403,7 +486,7 @@ export const CinemaStageModal: React.FC<Props> = ({ project, onClose }) => {
                         </button>
                         <button
                           onClick={() => jogFrame(1)}
-                          className="px-2 py-1 text-[10px] text-zinc-400 hover:text-white transition-colors flex items-center gap-0.5"
+                          className="px-1.5 py-1 text-[10px] text-zinc-400 hover:text-white transition-colors flex items-center gap-0.5"
                           title="Step Forward 1 Frame (Right Arrow)"
                         >
                           <span>1f</span>
@@ -412,18 +495,14 @@ export const CinemaStageModal: React.FC<Props> = ({ project, onClose }) => {
                       </div>
 
                       {/* Precision SMPTE Timecode Display */}
-                      <div className="px-2 py-0.5 rounded bg-black/50 border border-white/10 text-cyan-300 font-bold text-[11px] tracking-wider">
+                      <div className="px-1.5 py-0.5 rounded bg-black/50 border border-white/10 text-cyan-300 font-bold text-[10px] sm:text-[11px] tracking-wider">
                         {formatSMPTE(currentTime, 30)}
                       </div>
-                      <span className="text-zinc-600">/</span>
-                      <span className="text-zinc-400 text-[11px]">
-                        {formatMinutesSeconds(duration)}
-                      </span>
                     </div>
 
                     {/* Right: Volume & Fullscreen */}
-                    <div className="flex items-center gap-2.5">
-                      <div className="flex items-center gap-1.5">
+                    <div className="flex items-center gap-2">
+                      <div className="flex items-center gap-1">
                         <button
                           onClick={toggleMute}
                           className="p-1 text-zinc-400 hover:text-white transition-colors"
@@ -442,14 +521,14 @@ export const CinemaStageModal: React.FC<Props> = ({ project, onClose }) => {
                           step={0.05}
                           value={isMuted ? 0 : volume}
                           onChange={handleVolumeChange}
-                          className="w-14 sm:w-16 h-1 bg-zinc-700 rounded-lg appearance-none cursor-pointer accent-cyan-400"
+                          className="w-12 sm:w-16 h-1 bg-zinc-700 rounded-lg appearance-none cursor-pointer accent-cyan-400"
                         />
                       </div>
 
                       <button
                         onClick={toggleFullscreen}
                         className="p-1 text-zinc-400 hover:text-white transition-colors"
-                        title="Toggle Fullscreen"
+                        title={isFullscreen ? 'Exit Fullscreen' : 'Toggle Fullscreen'}
                       >
                         {isFullscreen ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}
                       </button>
@@ -460,7 +539,7 @@ export const CinemaStageModal: React.FC<Props> = ({ project, onClose }) => {
             )}
 
             {activeTab === 'grade' && project.hasColorGradeSlider && (
-              <div className="w-full h-full max-w-5xl flex items-center justify-center">
+              <div className="w-full h-full max-w-4xl flex items-center justify-center">
                 <ColorGradeSplitSlider
                   videoSrc={project.videoSrc}
                   camera={project.colorPipeline.camera}
@@ -473,58 +552,58 @@ export const CinemaStageModal: React.FC<Props> = ({ project, onClose }) => {
             )}
 
             {activeTab === 'specs' && (
-              <div className="w-full max-w-4xl overflow-y-auto space-y-6 py-4 px-2">
+              <div className="w-full max-w-3xl overflow-y-auto space-y-5 py-3 px-2">
                 {/* Description & Narrative Approach */}
-                <div className="p-6 rounded-2xl bg-white/[0.03] border border-white/10 space-y-3">
-                  <h3 className="text-sm font-semibold text-cyan-400 uppercase tracking-wider font-mono">
+                <div className="p-5 rounded-2xl bg-white/[0.03] border border-white/10 space-y-2">
+                  <h3 className="text-xs font-semibold text-cyan-400 uppercase tracking-wider font-mono">
                     Editorial Vision & Story Architecture
                   </h3>
-                  <p className="text-zinc-200 text-sm leading-relaxed">{project.description}</p>
+                  <p className="text-zinc-200 text-xs sm:text-sm leading-relaxed">{project.description}</p>
                 </div>
 
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  <div className="p-5 rounded-2xl bg-white/[0.03] border border-white/10 space-y-2">
-                    <h3 className="text-sm font-semibold text-emerald-400 uppercase tracking-wider font-mono">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <div className="p-4 rounded-2xl bg-white/[0.03] border border-white/10 space-y-1.5">
+                    <h3 className="text-xs font-semibold text-emerald-400 uppercase tracking-wider font-mono">
                       Rhythmic Pacing & Cutting Philosophy
                     </h3>
-                    <p className="text-zinc-300 text-sm leading-relaxed">{project.editorialApproach}</p>
+                    <p className="text-zinc-300 text-xs leading-relaxed">{project.editorialApproach}</p>
                   </div>
 
-                  <div className="p-5 rounded-2xl bg-white/[0.03] border border-white/10 space-y-2">
-                    <h3 className="text-sm font-semibold text-rose-400 uppercase tracking-wider font-mono">
+                  <div className="p-4 rounded-2xl bg-white/[0.03] border border-white/10 space-y-1.5">
+                    <h3 className="text-xs font-semibold text-rose-400 uppercase tracking-wider font-mono">
                       Color Science & Dynamic Range Tone Curve
                     </h3>
-                    <p className="text-zinc-300 text-sm leading-relaxed">{project.colorApproach}</p>
+                    <p className="text-zinc-300 text-xs leading-relaxed">{project.colorApproach}</p>
                   </div>
                 </div>
 
                 {/* Camera & Color Pipeline Card */}
-                <div className="p-6 rounded-2xl bg-white/[0.03] border border-white/10 font-mono text-xs">
-                  <h3 className="text-sm font-semibold text-zinc-200 uppercase tracking-wider font-sans mb-4 border-b border-white/10 pb-2">
+                <div className="p-5 rounded-2xl bg-white/[0.03] border border-white/10 font-mono text-xs">
+                  <h3 className="text-xs font-semibold text-zinc-200 uppercase tracking-wider font-sans mb-3 border-b border-white/10 pb-2">
                     Production & Color Pipeline Architecture
                   </h3>
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-zinc-300">
-                    <div className="flex justify-between p-3 rounded-lg bg-black/40 border border-white/5">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-zinc-300">
+                    <div className="flex justify-between p-2.5 rounded-lg bg-black/40 border border-white/5">
                       <span className="text-zinc-500">Camera Package</span>
                       <span className="text-white font-bold">{project.colorPipeline.camera}</span>
                     </div>
-                    <div className="flex justify-between p-3 rounded-lg bg-black/40 border border-white/5">
+                    <div className="flex justify-between p-2.5 rounded-lg bg-black/40 border border-white/5">
                       <span className="text-zinc-500">Optics / Lenses</span>
                       <span className="text-cyan-400 font-bold">{project.colorPipeline.lenses}</span>
                     </div>
-                    <div className="flex justify-between p-3 rounded-lg bg-black/40 border border-white/5">
+                    <div className="flex justify-between p-2.5 rounded-lg bg-black/40 border border-white/5">
                       <span className="text-zinc-500">Capture Color Space</span>
                       <span className="text-zinc-200">{project.colorPipeline.colorSpace}</span>
                     </div>
-                    <div className="flex justify-between p-3 rounded-lg bg-black/40 border border-white/5">
+                    <div className="flex justify-between p-2.5 rounded-lg bg-black/40 border border-white/5">
                       <span className="text-zinc-500">Print LUT Transform</span>
                       <span className="text-emerald-400 font-bold">{project.colorPipeline.lut}</span>
                     </div>
-                    <div className="flex justify-between p-3 rounded-lg bg-black/40 border border-white/5">
+                    <div className="flex justify-between p-2.5 rounded-lg bg-black/40 border border-white/5">
                       <span className="text-zinc-500">Master Resolution</span>
                       <span className="text-white">{project.metrics.resolution}</span>
                     </div>
-                    <div className="flex justify-between p-3 rounded-lg bg-black/40 border border-white/5">
+                    <div className="flex justify-between p-2.5 rounded-lg bg-black/40 border border-white/5">
                       <span className="text-zinc-500">Master Codec</span>
                       <span className="text-cyan-400">{project.metrics.codec}</span>
                     </div>
@@ -532,15 +611,15 @@ export const CinemaStageModal: React.FC<Props> = ({ project, onClose }) => {
                 </div>
 
                 {/* Toolchain Badges */}
-                <div className="p-5 rounded-2xl bg-white/[0.03] border border-white/10">
-                  <h3 className="text-xs font-semibold text-zinc-400 uppercase tracking-wider font-mono mb-3">
+                <div className="p-4 rounded-2xl bg-white/[0.03] border border-white/10">
+                  <h3 className="text-xs font-semibold text-zinc-400 uppercase tracking-wider font-mono mb-2">
                     Post-Production Toolchain
                   </h3>
-                  <div className="flex flex-wrap gap-2">
+                  <div className="flex flex-wrap gap-1.5">
                     {project.toolchain.map((tool, idx) => (
                       <span
                         key={idx}
-                        className="px-3 py-1 rounded-lg bg-white/5 border border-white/10 text-xs font-mono text-cyan-300"
+                        className="px-2.5 py-1 rounded-lg bg-white/5 border border-white/10 text-xs font-mono text-cyan-300"
                       >
                         {tool}
                       </span>

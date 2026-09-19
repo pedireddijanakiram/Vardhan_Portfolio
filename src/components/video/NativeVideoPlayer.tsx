@@ -184,6 +184,11 @@ export const NativeVideoPlayer: React.FC<Props> = ({
 
   const handleInspectClick = (e: React.MouseEvent) => {
     e.stopPropagation();
+    const video = videoRef.current;
+    if (video) {
+      video.pause();
+      setIsPlaying(false);
+    }
     onInspect?.();
   };
 
